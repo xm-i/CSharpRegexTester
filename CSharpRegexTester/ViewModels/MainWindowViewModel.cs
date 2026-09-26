@@ -1,108 +1,123 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reactive.Linq;
 using System.Text.RegularExpressions;
+using CommunityToolkit.Mvvm.ComponentModel;
+using R3;
 
-using Livet;
+namespace CSharpRegexTester.ViewModels;
 
-using Reactive.Bindings;
-using Reactive.Bindings.Extensions;
+/// <summary>
+/// メインウィンドウViewModel
+/// </summary>
+public class MainWindowViewModel : ViewModelBase {
+	/// <summary>
+	/// 対象文字列
+	/// </summary>
+	public BindableReactiveProperty<string> Text { get; } = new("");
 
-namespace CSharpRegexTester.ViewModels {
-	internal class MainWindowViewModel : ViewModel {
-		/// <summary>
-		/// 対象文字列
-		/// </summary>
-		public ReactivePropertySlim<string> Text {
-			get;
-		} = new ReactivePropertySlim<string>("");
+	/// <summary>
+	/// 正規表現パターン
+	/// </summary>
+	public BindableReactiveProperty<string> Format { get; } = new("");
 
-		/// <summary>
-		/// 正規表現
-		/// </summary>
-		public ReactiveProperty<string> Format {
-			get;
-		} = new ReactiveProperty<string>("");
+	/// <summary>
+	/// 置換文字列
+	/// </summary>
+	public BindableReactiveProperty<string> Replacement { get; } = new("");
 
-		/// <summary>
-		/// 置換文字列
-		/// </summary>
-		public ReactivePropertySlim<string> Replacement {
-			get;
-		} = new ReactivePropertySlim<string>("");
+	/// <summary>
+	/// マッチ結果
+	/// </summary>
+	public BindableReactiveProperty<IReadOnlyList<Match>> MatchResult { get; } = new([]);
 
-		/// <summary>
-		/// マッチ結果
-		/// </summary>
-		public ReactivePropertySlim<IEnumerable<Match>> MatchResult {
-			get;
-		} = new ReactivePropertySlim<IEnumerable<Match>>();
+	/// <summary>
+	/// 置換後文字列
+	/// </summary>
+	public BindableReactiveProperty<string> ReplacedText { get; } = new("");
 
-		/// <summary>
-		/// 置換後文字列
-		/// </summary>
-		public ReactivePropertySlim<string> ReplacedText {
-			get;
-		} = new ReactivePropertySlim<string>();
+	/// <summary>
+	/// オプション候補
+	/// </summary>
+	public IReadOnlyList<RegexOptionWithEnabledFlag> CandidateRegexOptions { get; }
 
-		/// <summary>
-		/// オプション候補
-		/// </summary>
-		public ReactiveCollection<RegexOptionWithEnabledFlag> CandidateRegexOptions {
-			get;
-		} = new ReactiveCollection<RegexOptionWithEnabledFlag>();
+	public MainWindowViewModel() {
+		this.Text.AddTo(this.CompositeDisposable);
+		this.Format.AddTo(this.CompositeDisposable);
+		this.Replacement.AddTo(this.CompositeDisposable);
+		this.MatchResult.AddTo(this.CompositeDisposable);
+		this.ReplacedText.AddTo(this.CompositeDisposable);
 
-		public MainWindowViewModel() {
-			this.Format.SetValidateNotifyError(x => {
-				try {
-					new Regex(x);
-				} catch (Exception) {
-					return "正規表現フォーマットエラー";
-				}
+		this.Format.EnableValidation(x => {
+			if (string.IsNullOrEmpty(x)) {
 				return null;
-			});
-			foreach (var ro in Enum.GetValues(typeof(RegexOptions)).Cast<RegexOptions>()) {
-				this.CandidateRegexOptions.Add(new RegexOptionWithEnabledFlag(ro, false));
 			}
+			try {
+				_ = new Regex(x);
+				return null;
+			} catch (Exception ex) {
+				return ex;
+			}
+		});
 
-			Observable.Merge(
-				this.Text,
-				this.Format,
-				this.Replacement).ToUnit()
-				.Merge(this.Format.ObserveHasErrors.ToUnit())
-				.Merge(this.CandidateRegexOptions.ObserveElementObservableProperty(x => x.Enabled).ToUnit())
-				.Where(_ => !this.Format.HasErrors)
-				.Subscribe(_ => {
-					var options = RegexOptions.None;
-					foreach (var op in this.CandidateRegexOptions.Where(x => x.Enabled.Value)) {
-						options |= op.RegexOption;
-					}
-					var regex = new Regex(this.Format.Value, options);
-					this.ReplacedText.Value = regex.Replace(this.Text.Value, this.Replacement.Value);
-					this.MatchResult.Value = regex.Matches(this.Text.Value).AsEnumerable();
-				});
-		}
+		this.CandidateRegexOptions = [
+			.. Enum.GetValues<RegexOptions>()
+				.Select(ro => new RegexOptionWithEnabledFlag(ro).AddTo(this.CompositeDisposable))
+		];
+
+		Observable.Merge(
+			this.Text.AsUnitObservable(),
+			this.Format.AsUnitObservable(),
+			this.Replacement.AsUnitObservable(),
+			this.CandidateRegexOptions.Select(x => x.Enabled.AsUnitObservable()).Merge()
+		)
+		.Subscribe(_ => this.Update())
+		.AddTo(this.CompositeDisposable);
+
+		this.Update();
 	}
 
-	internal class RegexOptionWithEnabledFlag : NotificationObject {
-		public RegexOptions RegexOption {
-			get;
+	private void Update() {
+		if (this.Format.HasErrors) {
+			return;
 		}
 
-		public string DisplayName {
-			get {
-				return Enum.GetName(typeof(RegexOptions), this.RegexOption);
+		if (string.IsNullOrEmpty(this.Format.Value)) {
+			this.MatchResult.Value = [];
+			this.ReplacedText.Value = this.Text.Value;
+			return;
+		}
+
+		var options = RegexOptions.None;
+		foreach (var op in this.CandidateRegexOptions) {
+			if (op.Enabled.Value) {
+				options |= op.RegexOption;
 			}
 		}
 
-		public ReactivePropertySlim<bool> Enabled {
-			get;
-		} = new ReactivePropertySlim<bool>();
-
-		public RegexOptionWithEnabledFlag(RegexOptions regexOption, bool enabled) {
-			this.RegexOption = regexOption;
-			this.Enabled.Value = enabled;
+		try {
+			var regex = new Regex(this.Format.Value, options, TimeSpan.FromSeconds(2));
+			this.ReplacedText.Value = regex.Replace(this.Text.Value, this.Replacement.Value);
+			this.MatchResult.Value = [.. regex.Matches(this.Text.Value).Cast<Match>()];
+		} catch (Exception ex) {
+			this.ReplacedText.Value = $"[エラー: {ex.Message}]";
+			this.MatchResult.Value = [];
 		}
+	}
+}
+
+/// <summary>
+/// 正規表現オプションと有効フラグのペア
+/// </summary>
+public class RegexOptionWithEnabledFlag(RegexOptions regexOption, bool enabled = false) : ObservableObject, IDisposable {
+	public RegexOptions RegexOption { get; } = regexOption;
+
+	public string DisplayName => Enum.GetName(this.RegexOption) ?? this.RegexOption.ToString();
+
+	public BindableReactiveProperty<bool> Enabled { get; } = new(enabled);
+
+	public void Dispose() {
+		this.Enabled.Dispose();
+		GC.SuppressFinalize(this);
 	}
 }
